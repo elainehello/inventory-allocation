@@ -1,0 +1,4 @@
+Core packages
+pip install fastapi sqlalchemy alembic pydantic pytest uvicorn
+pip freeze > requirements.txt
+
