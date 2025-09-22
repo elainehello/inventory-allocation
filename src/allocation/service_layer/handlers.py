@@ -1,4 +1,4 @@
-from allocation.domain import models
+from allocation.domain import models, commands
 from allocation.service_layer.ports import AbstractUnitOfWork
 from allocation.domain.exceptions import CannotAllocateError
 
@@ -6,27 +6,51 @@ class InvalidSku(Exception):
     """Application-level exception for non-existent SKUs."""
     pass
 
-def allocate_order_handler(orderid: str, sku: str, qty: int, uow: AbstractUnitOfWork):
+def add_batch(command: commands.CreateBatch, uow: AbstractUnitOfWork):
     """
-    Orchestrates the allocation use case:
-    1. Wrap in UoW (transactional boundary).
-    2. Fetch aggregate root (Product).
-    3. Delegate business rules to the domain (Product.allocate).
-    4. Commit if successful, raise errors otherwise.
+    Handle the CreateBatch command by adding a new batch to the repository.
     """
-    line = models.OrderLine(orderid, sku, qty)
-
     with uow:
-        product = uow.products.get(sku=sku)
-
+        product = uow.products.get(sku=command.sku)
         if product is None:
-            raise InvalidSku(f"Invalid SKU {sku}")
-
-        try:
-            batchref = product.allocate(line)  # domain logic
-        except CannotAllocateError:
-            raise  # bubble up domain exception (e.g., for API translation)
+            product = models.Product(sku=command.sku, batches=[])
+            uow.products.add(product)
         
+        product.batches.append(models.Batch(
+            ref=command.ref,
+            sku=command.sku,
+            purchased_qty=command.qty,
+            eta=command.eta
+        ))
         uow.commit()
-        return batchref
+
+def allocate(command: commands.Allocate, uow: AbstractUnitOfWork):
+    """
+    Handle the Allocate command by allocating an order line to a batch.
+    """
+    line = models.OrderLine(command.orderid, command.sku, command.qty)
+    with uow:
+        product = uow.products.get(sku=command.sku)
+        if product is None:
+            raise InvalidSku(f"Invalid SKU {command.sku}")
+        
+        try:
+            batchref = product.allocate(line)
+            uow.commit()
+            return batchref
+        except CannotAllocateError:
+            raise  # Bubble up the domain exception for higher-level handling
+
+def change_batch_quantity(command: commands.ChangeBatchQuantity, uow: AbstractUnitOfWork):
+    """
+    Handle the ChangeBatchQuantity command by updating the quantity of a batch.
+    """
+    with uow:
+        product = uow.products.get_by_batchref(command.ref)
+        if product is None:
+            raise InvalidSku(f"Invalid batch reference {command.ref}")
+        
+        # Delegate the logic to the Product aggregate
+        product.change_batch_quantity(ref=command.ref, qty=command.qty)
+        uow.commit()
 
